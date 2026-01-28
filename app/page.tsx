@@ -30,24 +30,45 @@ function inchesToMm(xIn: number) {
   return xIn * IN_TO_MM;
 }
 
+/** Round pipe area using OD (mm) and thickness t (mm) */
 function areaRoundMm2(odMm: number, tMm: number) {
-  // ID = OD - 2t
-  const idMm = odMm - 2 * tMm;
+  const idMm = odMm - 2 * tMm; // ID = OD - 2t
   if (!(idMm > 0)) return NaN;
   return (Math.PI / 4) * (odMm * odMm - idMm * idMm);
 }
 
-function areaSquareTubeMm2(sideMm: number, tMm: number) {
-  // inner = side - 2t
-  const inner = sideMm - 2 * tMm;
-  if (!(inner > 0)) return NaN;
-  return sideMm * sideMm - inner * inner;
+/** Rectangular tube area using outer W,H (mm) and thickness t (mm) */
+function areaRectTubeMm2(wMm: number, hMm: number, tMm: number) {
+  const iw = wMm - 2 * tMm;
+  const ih = hMm - 2 * tMm;
+  if (!(iw > 0 && ih > 0)) return NaN;
+  return wMm * hMm - iw * ih;
 }
 
+/** kg per unit length from area */
 function kgPerUnitFromArea(areaMm2: number, unit: LenUnit) {
   const lenMm = unit === "ft" ? FT_TO_MM : M_TO_MM; // per 1 ft OR per 1 m
   const volMm3 = areaMm2 * lenMm;
-  return volMm3 * STEEL_DENSITY_KG_PER_MM3; // kg per unit
+  return volMm3 * STEEL_DENSITY_KG_PER_MM3;
+}
+
+/**
+ * Parse box size in inches from ONE input:
+ * - "4/5", "4 / 5", "4x5", "4×5" => W=4, H=5 (inches)
+ * - "4" => square: W=H=4
+ */
+function parseWHInches(raw: string): { wIn: number; hIn: number } {
+  const s = (raw || "").trim().toLowerCase();
+
+  const m = s.match(/^(\d+(\.\d+)?)\s*(\/|x|×)\s*(\d+(\.\d+)?)$/);
+  if (m) {
+    return { wIn: clampNonNegative(num(m[1])), hIn: clampNonNegative(num(m[4])) };
+  }
+
+  const one = clampNonNegative(num(s));
+  if (Number.isFinite(one)) return { wIn: one, hIn: one };
+
+  return { wIn: NaN, hIn: NaN };
 }
 
 export default function PipeWeightPage() {
@@ -55,12 +76,12 @@ export default function PipeWeightPage() {
 
   // Round: OD inches, Thickness mm, Length + unit
   const [odIn, setOdIn] = useState("");
-  const [thMmRound, setThMmRound] = useState(""); // thickness in mm (round)
+  const [thMmRound, setThMmRound] = useState(""); // thickness in mm
   const [roundLen, setRoundLen] = useState("");
   const [roundLenUnit, setRoundLenUnit] = useState<LenUnit>("ft");
 
-  // Square: Side inches, Thickness mm, Length + unit
-  const [sideIn, setSideIn] = useState("");
+  // Square/Box: Size inches as "W/H", Thickness mm, Length + unit
+  const [sideIn, setSideIn] = useState(""); // accepts "4/5"
   const [thMmSq, setThMmSq] = useState("");
   const [sqLen, setSqLen] = useState("");
   const [sqLenUnit, setSqLenUnit] = useState<LenUnit>("m");
@@ -80,19 +101,16 @@ export default function PipeWeightPage() {
     }
   }, [pipeType]);
 
+  /** ===== ROUND (already professional) ===== */
   const round = useMemo(() => {
-    const odInVal = clampNonNegative(num(odIn));        // inches
-    const tMm = clampNonNegative(num(thMmRound));       // mm
-    const L = clampNonNegative(num(roundLen));          // ft or m (based on unit)
+    const odInVal = clampNonNegative(num(odIn)); // inches
+    const tMm = clampNonNegative(num(thMmRound)); // mm
+    const L = clampNonNegative(num(roundLen)); // numeric
 
     const odMm = Number.isFinite(odInVal) ? inchesToMm(odInVal) : NaN;
 
-    // Professional validation
     const validDims =
-      Number.isFinite(odMm) &&
-      Number.isFinite(tMm) &&
-      tMm > 0 &&
-      odMm > 2 * tMm;
+      Number.isFinite(odMm) && Number.isFinite(tMm) && tMm > 0 && odMm > 2 * tMm;
 
     if (!validDims) {
       return {
@@ -100,12 +118,12 @@ export default function PipeWeightPage() {
         unitLabel: roundLenUnit === "ft" ? "kg/ft" : "kg/m",
         wPerUnit: NaN,
         total: NaN,
-        note: "Round: OD must be in inches, Thickness in mm, and OD > 2×Thickness.",
+        note: "Round: Enter OD in inches and Thickness in mm. OD must be > 2×Thickness.",
       };
     }
 
     const area = areaRoundMm2(odMm, tMm);
-    const wPerUnit = kgPerUnitFromArea(area, roundLenUnit); // kg/ft OR kg/m
+    const wPerUnit = kgPerUnitFromArea(area, roundLenUnit);
 
     const hasLen = Number.isFinite(L) && L > 0;
     const total = hasLen ? wPerUnit * L : NaN;
@@ -119,18 +137,22 @@ export default function PipeWeightPage() {
     };
   }, [odIn, thMmRound, roundLen, roundLenUnit]);
 
+  /** ===== BOX (UPDATED: accepts W/H like 4/5) ===== */
   const square = useMemo(() => {
-    const sideInVal = clampNonNegative(num(sideIn));     // inches
-    const tMm = clampNonNegative(num(thMmSq));           // mm
-    const L = clampNonNegative(num(sqLen));              // ft or m (based on unit)
+    const { wIn, hIn } = parseWHInches(sideIn); // inches (W/H)
+    const tMm = clampNonNegative(num(thMmSq)); // mm
+    const L = clampNonNegative(num(sqLen)); // numeric length
 
-    const sideMm = Number.isFinite(sideInVal) ? inchesToMm(sideInVal) : NaN;
+    const wMm = Number.isFinite(wIn) ? inchesToMm(wIn) : NaN;
+    const hMm = Number.isFinite(hIn) ? inchesToMm(hIn) : NaN;
 
     const validDims =
-      Number.isFinite(sideMm) &&
+      Number.isFinite(wMm) &&
+      Number.isFinite(hMm) &&
       Number.isFinite(tMm) &&
       tMm > 0 &&
-      sideMm > 2 * tMm;
+      wMm > 2 * tMm &&
+      hMm > 2 * tMm;
 
     if (!validDims) {
       return {
@@ -138,12 +160,12 @@ export default function PipeWeightPage() {
         unitLabel: sqLenUnit === "ft" ? "kg/ft" : "kg/m",
         wPerUnit: NaN,
         total: NaN,
-        note: "Square: Side must be in inches, Thickness in mm, and Side > 2×Thickness.",
+        note: "Box: Enter size in inches like 4/5 (W/H) and Thickness in mm. Both sides must be > 2×Thickness.",
       };
     }
 
-    const area = areaSquareTubeMm2(sideMm, tMm);
-    const wPerUnit = kgPerUnitFromArea(area, sqLenUnit); // kg/ft OR kg/m
+    const area = areaRectTubeMm2(wMm, hMm, tMm);
+    const wPerUnit = kgPerUnitFromArea(area, sqLenUnit);
 
     const hasLen = Number.isFinite(L) && L > 0;
     const total = hasLen ? wPerUnit * L : NaN;
@@ -153,7 +175,7 @@ export default function PipeWeightPage() {
       unitLabel: sqLenUnit === "ft" ? "kg/ft" : "kg/m",
       wPerUnit,
       total,
-      note: "Calculated using geometry + steel density (7850 kg/m³).",
+      note: "Calculated as rectangular tube (outer W×H minus inner (W−2t)×(H−2t)) using steel density 7850 kg/m³.",
     };
   }, [sideIn, thMmSq, sqLen, sqLenUnit]);
 
@@ -218,7 +240,7 @@ export default function PipeWeightPage() {
                       : "border-zinc-800 bg-zinc-950 text-zinc-200 hover:bg-zinc-900",
                   ].join(" ")}
                 >
-                  Square Pipe
+                  Square/Box Pipe
                 </button>
               </div>
             </div>
@@ -226,8 +248,20 @@ export default function PipeWeightPage() {
             {/* Round Form */}
             {pipeType === "round" && (
               <div className="mt-5 space-y-4">
-                <Field label="Outer Diameter (OD)" unit="in" value={odIn} onChange={setOdIn} placeholder="e.g., 2" />
-                <Field label="Thickness (T)" unit="mm" value={thMmRound} onChange={setThMmRound} placeholder="e.g., 2" />
+                <Field
+                  label="Outer Diameter (OD)"
+                  unit="in"
+                  value={odIn}
+                  onChange={setOdIn}
+                  placeholder="e.g., 2"
+                />
+                <Field
+                  label="Thickness (T)"
+                  unit="mm"
+                  value={thMmRound}
+                  onChange={setThMmRound}
+                  placeholder="e.g., 2"
+                />
 
                 <div className="grid grid-cols-2 gap-3">
                   <Field
@@ -257,11 +291,23 @@ export default function PipeWeightPage() {
               </div>
             )}
 
-            {/* Square Form */}
+            {/* Box/Square Form */}
             {pipeType === "square" && (
               <div className="mt-5 space-y-4">
-                <Field label="Outer Side (S)" unit="in" value={sideIn} onChange={setSideIn} placeholder="e.g., 2" />
-                <Field label="Thickness (T)" unit="mm" value={thMmSq} onChange={setThMmSq} placeholder="e.g., 2" />
+                <Field
+                  label="Outer Size (W/H)"
+                  unit="in"
+                  value={sideIn}
+                  onChange={setSideIn}
+                  placeholder="e.g., 4/5"
+                />
+                <Field
+                  label="Thickness (T)"
+                  unit="mm"
+                  value={thMmSq}
+                  onChange={setThMmSq}
+                  placeholder="e.g., 2"
+                />
 
                 <div className="grid grid-cols-2 gap-3">
                   <Field
@@ -286,7 +332,7 @@ export default function PipeWeightPage() {
                 </div>
 
                 <p className="text-[11px] text-zinc-500">
-                  Method: Cross-section area × density (7850 kg/m³)
+                  Tip: Enter size like 2/5, 4/5, 4x6 (inches). Method: area × density (7850 kg/m³)
                 </p>
               </div>
             )}
@@ -313,7 +359,7 @@ export default function PipeWeightPage() {
               </p>
               {!active.ok && (
                 <p className="mt-2 text-[11px] text-zinc-500">
-                  Tip: Thickness &gt; 0 and outer size must be &gt; 2×thickness.
+                  Tip: Thickness &gt; 0 and both outer sides must be &gt; 2×thickness.
                 </p>
               )}
             </div>
